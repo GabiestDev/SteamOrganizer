@@ -1,0 +1,13 @@
+# Arquivos locais do projeto (não subir)
+candidaturas/
+config.ini
+*.tmp
+*.log
+
+# Backup temporário do steamorganizer
+/tmp/steamorganizer_backup_*
+/tmp/funnie_backup_*
+
+# Python
+__pycache__/
+*.pyc
