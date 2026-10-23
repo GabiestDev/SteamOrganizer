@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+import argparse
 import base64
+import concurrent.futures
 import importlib
 import json
 import os
@@ -623,7 +625,9 @@ class UI:
             return False, ""
 
     @classmethod
-    def choice(cls, header, options, default_index=0, multiselect=False):
+    def choice(cls, header, options, default_index=0, multiselect=False, enabled=True):
+        if not enabled:
+            return [options[default_index]] if not multiselect else options
         gum_ok, out = cls._run_gum(["gum", "choose", "--header", header,
                                   "--limit", "0" if multiselect else "1",
                                   "--height", str(min(len(options) + 2, 20))] + options)
@@ -643,7 +647,9 @@ class UI:
             return [options[default_index]]
 
     @classmethod
-    def input(cls, header, default="", placeholder=""):
+    def input(cls, header, default="", placeholder="", enabled=True):
+        if not enabled:
+            return default
         gum_ok, out = cls._run_gum(["gum", "input", "--header", header, "--value", default or ""])
         if gum_ok:
             return out
@@ -651,7 +657,9 @@ class UI:
         return val if val else (default or placeholder or "")
 
     @classmethod
-    def confirm(cls, header, default=True):
+    def confirm(cls, header, default=True, enabled=True):
+        if not enabled:
+            return default
         gum_ok, _ = cls._run_gum(["gum", "confirm", "--default", str(default).lower(), "--header", header])
         if gum_ok:
             return True
@@ -663,9 +671,10 @@ class UI:
 
 
 class CollectionWriter:
-    def __init__(self, cs_file, ui):
+    def __init__(self, cs_file, ui, backup_path=None):
         self.cs_file = cs_file
         self.ui = ui
+        self.backup_path = backup_path
         self.d = json.load(open(cs_file, encoding="utf-8"))
         self.by_key = {e[0]: e for e in self.d}
         self.existing_by_name = {}
@@ -684,6 +693,11 @@ class CollectionWriter:
             k = "uc-" + "".join(rnd.choice(string.ascii_letters + string.digits) for _ in range(12))
             if "user-collections." + k not in self.by_key:
                 return k
+
+    def _rollback(self):
+        if self.backup_path and self.backup_path.exists():
+            shutil.copy2(self.backup_path, self.cs_file)
+            print(f"  [ROLLBACK] Restaurado backup: {self.backup_path}")
 
     def write(self, final_groups, order, criar_inst, nome_inst):
         now = int(time.time())
@@ -708,73 +722,143 @@ class CollectionWriter:
             except Exception:
                 pass
 
-        for name in order:
-            apps = sorted(final_groups.get(name, set()))
-            if not apps and name != nome_inst:
-                continue
-            key = self.existing_by_name.get(name)
-            if key:
-                updated += 1
-            else:
-                key = "user-collections." + self._new_id()
-                created += 1
-            val = {"id": key.split(".", 1)[1], "name": name, "added": apps, "removed": []}
-            entry = [key, {"key": key, "timestamp": now, "value": json.dumps(val, ensure_ascii=False, separators=(",", ":")), "version": "596"}]
-            if key in self.by_key:
-                idx = next(i for i, x in enumerate(self.d) if x[0] == key)
-                self.d[idx] = entry
-            else:
-                self.d.append(entry)
-            self.by_key[key] = entry
-
-        if criar_inst:
-            inst_key = self.existing_by_name.get("Instalados localmente") or self.existing_by_name.get(nome_inst)
-            if inst_key and inst_key in self.by_key:
-                e = self.by_key[inst_key]
-                v = json.loads(e[1]["value"])
-                v["name"] = nome_inst
-                e[1]["value"] = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
-                e[1]["timestamp"] = now
-
-        tmp = str(self.cs_file) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.d, f, ensure_ascii=False)
-        os.replace(tmp, self.cs_file)
-
         try:
-            with open(self.cs_file, encoding="utf-8") as f:
-                d2 = json.load(f)
-            valid = sum(
-                1 for e in d2
-                if e[0].startswith("user-collections.") and not e[1].get("is_deleted")
-                and (lambda v: v.get("name") and isinstance(v.get("added"), list))(json.loads(e[1]["value"]))
-            )
-            print(f"  Arquivo JSON válido. {valid} coleções ativas encontradas.")
-        except Exception as ex:
-            print(f"  ERRO na validação: {ex}")
+            for name in order:
+                apps = sorted(final_groups.get(name, set()))
+                if not apps and name != nome_inst:
+                    continue
+                key = self.existing_by_name.get(name)
+                if key:
+                    updated += 1
+                else:
+                    key = "user-collections." + self._new_id()
+                    created += 1
+                val = {"id": key.split(".", 1)[1], "name": name, "added": apps, "removed": []}
+                entry = [key, {"key": key, "timestamp": now, "value": json.dumps(val, ensure_ascii=False, separators=(",", ":")), "version": "596"}]
+                if key in self.by_key:
+                    idx = next(i for i, x in enumerate(self.d) if x[0] == key)
+                    self.d[idx] = entry
+                else:
+                    self.d.append(entry)
+                self.by_key[key] = entry
+
+            if criar_inst:
+                inst_key = self.existing_by_name.get("Instalados localmente") or self.existing_by_name.get(nome_inst)
+                if inst_key and inst_key in self.by_key:
+                    e = self.by_key[inst_key]
+                    v = json.loads(e[1]["value"])
+                    v["name"] = nome_inst
+                    e[1]["value"] = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+                    e[1]["timestamp"] = now
+
+            tmp = str(self.cs_file) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.d, f, ensure_ascii=False)
+            os.replace(tmp, self.cs_file)
+
+            try:
+                with open(self.cs_file, encoding="utf-8") as f:
+                    d2 = json.load(f)
+                valid = sum(
+                    1 for e in d2
+                    if e[0].startswith("user-collections.") and not e[1].get("is_deleted")
+                    and (lambda v: v.get("name") and isinstance(v.get("added"), list))(json.loads(e[1]["value"]))
+                )
+                print(f"  Arquivo JSON válido. {valid} coleções ativas encontradas.")
+            except Exception as ex:
+                print(f"  ERRO na validação: {ex}")
+                self._rollback()
+                raise
+
+        except Exception as e:
+            print(f"  ERRO ao gravar: {e}")
+            self._rollback()
+            raise
 
         return created, updated, len(orfãs)
 
 
 class SteamOrganizer:
-    def __init__(self):
+    def __init__(self, args=None):
+        self.args = args or {}
         self.detector = SteamDetector()
         self.ui = UI()
 
+    def _enabled(self):
+        return not self.args.get("no_gum", False)
+
+    def _ensure_deps(self):
+        for pkg in ["vdf", "websocket-client", "psutil"]:
+            try:
+                importlib.import_module(pkg.replace("-", "_"))
+            except ImportError:
+                print(f"Instalando dependência: {pkg} ...")
+                try:
+                    subprocess.check_call(
+                        [sys.executable, "-m", "pip", "install", pkg, "--quiet"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    print(f"  {pkg} instalado com sucesso.")
+                except Exception as e:
+                    if pkg == "vdf":
+                        print("  vdf não instalado — usando parser VDF puro Python (sem impacto).")
+                    else:
+                        print(f"  Não foi possível instalar {pkg}: {e}")
+                        print(f"  Rode manualmente: pip install {pkg}")
+
+    @staticmethod
+    def _find_userdata_dirs(steam_path):
+        userdata = Path(steam_path) / "userdata"
+        if not userdata.exists():
+            return []
+        return sorted([d for d in userdata.iterdir() if d.is_dir() and d.name.isdigit()])
+
+    @staticmethod
+    def _select_user(userdirs, enabled):
+        if len(userdirs) > 1:
+            print("Vários usuários encontrados:")
+            for i, u in enumerate(userdirs):
+                print(f"  {i + 1}. {u.name}")
+            sel = UI.choice("Escolha o usuário:", [u.name for u in userdirs], default_index=0, enabled=enabled)
+            return sel[0] if sel else userdirs[0].name
+        return userdirs[0].name
+
+    @staticmethod
+    def _find_cloud_storage(userdata_dir):
+        p = userdata_dir / "config" / "cloudstorage" / "cloud-storage-namespace-1.json"
+        return p if p.exists() else None
+
+    @staticmethod
+    def _load_hidden(cs_file):
+        hidden = set()
+        try:
+            d = json.load(open(cs_file, encoding="utf-8"))
+            for e in d:
+                if e[0] == "user-collections.hidden":
+                    try:
+                        hidden = set(json.loads(e[1]["value"]).get("added", []))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return hidden
+
     def run(self):
+        enabled = self._enabled()
         print("=== steamorganizer — Organizador de Biblioteca Steam (pt-BR) ===\n")
 
         self._ensure_deps()
 
-        steam_paths = self.detector.detect()
-        if not steam_paths:
-            sp = input("Caminho manual da Steam (ex: C:\\Program Files (x86)\\Steam): ").strip()
-            steam_paths = [sp] if sp else []
-        if not steam_paths:
-            print("Nenhuma Steam encontrada. Saindo.")
-            return
-
-        steam_path = steam_paths[0]
+        steam_path = self.args.get("steam_path")
+        if not steam_path:
+            steam_paths = self.detector.detect()
+            if not steam_paths:
+                sp = input("Caminho manual da Steam (ex: C:\\Program Files (x86)\\Steam): ").strip()
+                steam_paths = [sp] if sp else []
+            if not steam_paths:
+                print("Nenhuma Steam encontrada. Saindo.")
+                return
+            steam_path = steam_paths[0]
         print(f"Steam: {steam_path}")
 
         userdirs = self._find_userdata_dirs(steam_path)
@@ -782,7 +866,7 @@ class SteamOrganizer:
             print("Nenhum userdata encontrado.")
             return
 
-        steam_id = self._select_user(userdirs)
+        steam_id = self._select_user(userdirs, enabled)
         userdata_dir = next((u for u in userdirs if u.name == steam_id), userdirs[0])
         cs_file = self._find_cloud_storage(userdata_dir)
         lc_file = userdata_dir / "config" / "localconfig.vdf"
@@ -795,14 +879,14 @@ class SteamOrganizer:
         print(f"Usuário: {steam_id}")
         print(f"Arquivo: {cs_file}\n")
 
-        modo = self.ui.choice(
-            "Como montar a lista de jogos?",
-            ["Rápida (só jogos com tempo/config)", "Completa (todos, inclui família/empréstimo)"],
-            default_index=1,
-        )
-        use_full = "Completa" in (modo[0] if modo else "")
+        use_full = self.args.get("full", False)
+        if not enabled and not use_full:
+            use_full = True
 
-        dry_run = self.ui.confirm("Modo apenas visualizar (dry-run)? Não grava nada, só mostra o resumo.", default=False)
+        if not self.args.get("dry_run", False):
+            dry_run = self.ui.confirm("Modo apenas visualizar (dry-run)? Não grava nada, só mostra o resumo.", default=False, enabled=enabled)
+        else:
+            dry_run = True
 
         cats_raw = [
             ("Ação 🎯", "acao", "🎯"), ("Aventura 🌍", "aventura", "🌍"),
@@ -818,27 +902,29 @@ class SteamOrganizer:
             ("VR 🥽", "vr", "🥽"), ("Outros 📁", "outros", "📁"),
         ]
 
+        default_sel = [c[0] for c in cats_raw]
         sel_cats = self.ui.choice(
             "Quais categorias criar? (números separados por vírgula)",
             [c[0] for c in cats_raw],
             multiselect=True,
+            enabled=enabled,
         )
-        sel_set = set(sel_cats) if sel_cats else set(c[0] for c in cats_raw)
+        sel_set = set(sel_cats) if sel_cats else set(default_sel)
         cat_nomes = {c[1]: c[0] for c in cats_raw}
         cat_emojis = {c[1]: c[2] for c in cats_raw}
 
-        criar_fam = self.ui.confirm("Criar coleção pai 'Franquias' (união dos jogos de mesma franquia)?", default=True)
-        nome_fam = self.ui.input("Nome da coleção pai de franquias", default="Franquias 📂") or "Franquias 📂"
+        criar_fam = self.ui.confirm("Criar coleção pai 'Franquias' (união dos jogos de mesma franquia)?", default=True, enabled=enabled)
+        nome_fam = self.ui.input("Nome da coleção pai de franquias", default="Franquias 📂", enabled=enabled) or "Franquias 📂"
 
-        criar_inst = self.ui.confirm("Deixar 'Instalados localmente' no topo da lista?", default=True)
-        nome_inst = self.ui.input("Nome da coleção de instalados", default="📦 Instalados localmente") or "📦 Instalados localmente"
+        criar_inst = self.ui.confirm("Deixar 'Instalados localmente' no topo da lista?", default=True, enabled=enabled)
+        nome_inst = self.ui.input("Nome da coleção de instalados", default="📦 Instalados localmente", enabled=enabled) or "📦 Instalados localmente"
 
         print("\n⚠  A Steam será FECHADA e o arquivo cloud-storage será reescrito.")
         print("   Backup será feito automaticamente.")
         if dry_run:
             print("\n=== MODO DRY-RUN (apenas visualizar) ===")
         else:
-            if not self.ui.confirm("Fechar Steam e aplicar agora?", default=True):
+            if not self.ui.confirm("Fechar Steam e aplicar agora?", default=True, enabled=enabled):
                 print("Cancelado.")
                 return
 
@@ -861,13 +947,16 @@ class SteamOrganizer:
             rows = LibraryBuilder.fast(appinfo_file, lc_file)
 
         hidden = self._load_hidden(cs_file)
+
         groups = {}
-        for r in rows:
-            aid = int(r["appid"])
-            if aid in hidden:
-                continue
-            for c in Classifier.classify(r):
-                groups.setdefault(c, set()).add(aid)
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_to_app = {executor.submit(Classifier.classify, r): r for r in rows if int(r["appid"]) not in hidden}
+            for future in concurrent.futures.as_completed(future_to_app):
+                app = future_to_app[future]
+                cols = future.result()
+                aid = int(app["appid"])
+                for c in cols:
+                    groups.setdefault(c, set()).add(aid)
 
         final_groups = {}
         for c, appids in groups.items():
@@ -931,7 +1020,7 @@ class SteamOrganizer:
             print("\n=== MODO DRY-RUN ENCERRADO. Nenhum arquivo foi modificado. ===")
             return
 
-        writer = CollectionWriter(cs_file, self.ui)
+        writer = CollectionWriter(cs_file, self.ui, backup_path=backup_dir / cs_file.name if backup_dir else None)
         created, updated, orfãs = writer.write(final_groups, order, criar_inst, nome_inst)
 
         print(f"\nCriadas: {created}, Atualizadas: {updated}, Órfãs removidas: {orfãs}")
@@ -942,66 +1031,28 @@ class SteamOrganizer:
             print(f"\nBackup: {backup_dir}")
         print("\nConcluído! Reinicie a Steam para ver as coleções.")
 
-        if self.ui.confirm("Reiniciar a Steam agora?", default=True):
+        if self.ui.confirm("Reiniciar a Steam agora?", default=True, enabled=enabled):
             SteamManager.start()
 
-    @staticmethod
-    def _ensure_deps():
-        for pkg in ["vdf", "websocket-client", "psutil"]:
-            try:
-                importlib.import_module(pkg.replace("-", "_"))
-            except ImportError:
-                print(f"Instalando dependência: {pkg} ...")
-                try:
-                    subprocess.check_call(
-                        [sys.executable, "-m", "pip", "install", pkg, "--quiet"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
-                    print(f"  {pkg} instalado com sucesso.")
-                except Exception as e:
-                    if pkg == "vdf":
-                        print("  vdf não instalado — usando parser VDF puro Python (sem impacto).")
-                    else:
-                        print(f"  Não foi possível instalar {pkg}: {e}")
-                        print(f"  Rode manualmente: pip install {pkg}")
 
-    @staticmethod
-    def _find_userdata_dirs(steam_path):
-        userdata = Path(steam_path) / "userdata"
-        if not userdata.exists():
-            return []
-        return sorted([d for d in userdata.iterdir() if d.is_dir() and d.name.isdigit()])
+def build_arg_parser():
+    p = argparse.ArgumentParser(description="Organizador de Biblioteca Steam (pt-BR)")
+    p.add_argument("--steam-path", help="Caminho da instalação Steam")
+    p.add_argument("--user", help="SteamID3 da conta (ex: 376470568)")
+    p.add_argument("--full", action="store_true", help="Modo completo (inclui família/empréstimo)")
+    p.add_argument("--dry-run", action="store_true", help="Apenas visualizar, não grava nada")
+    p.add_argument("--no-gum", action="store_true", help="Desativar gum, usar input()")
+    p.add_argument("--no-restart", action="store_true", help="Não reiniciar a Steam ao final")
+    return p
 
-    @staticmethod
-    def _select_user(userdirs):
-        if len(userdirs) > 1:
-            print("Vários usuários encontrados:")
-            for i, u in enumerate(userdirs):
-                print(f"  {i + 1}. {u.name}")
-            sel = UI.choice("Escolha o usuário:", [u.name for u in userdirs], default_index=0)
-            return sel[0] if sel else userdirs[0].name
-        return userdirs[0].name
 
-    @staticmethod
-    def _find_cloud_storage(userdata_dir):
-        p = userdata_dir / "config" / "cloudstorage" / "cloud-storage-namespace-1.json"
-        return p if p.exists() else None
-
-    @staticmethod
-    def _load_hidden(cs_file):
-        hidden = set()
-        try:
-            d = json.load(open(cs_file, encoding="utf-8"))
-            for e in d:
-                if e[0] == "user-collections.hidden":
-                    try:
-                        hidden = set(json.loads(e[1]["value"]).get("added", []))
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        return hidden
+def main():
+    parser = build_arg_parser()
+    args = vars(parser.parse_args())
+    if args.get("no_restart"):
+        args["_no_restart"] = True
+    SteamOrganizer(args).run()
 
 
 if __name__ == "__main__":
-    SteamOrganizer().run()
+    main()

@@ -10,9 +10,30 @@ Organizador de biblioteca Steam em português (pt-BR). Script único em **Python
 
 ## Uso
 
+### Modo interativo
+
 ```bash
 python steamorganizer.py
 ```
+
+### Modo linha de comando (CLI)
+
+```bash
+python steamorganizer.py --steam-path "/caminho/da/steam" --user 376470568 --full --dry-run
+python steamorganizer.py --steam-path "/caminho/da/steam" --full
+python steamorganizer.py --no-gum --full
+```
+
+### Argumentos CLI
+
+| Argumento | Descrição |
+|-----------|-----------|
+| `--steam-path` | Caminho da instalação Steam |
+| `--user` | SteamID3 da conta (ex: 376470568) |
+| `--full` | Modo completo (inclui família/empréstimo) |
+| `--dry-run` | Apenas visualizar, não grava nada |
+| `--no-gum` | Desativar gum, usar input() |
+| `--no-restart` | Não reiniciar a Steam ao final |
 
 O script fará tudo automaticamente:
 
@@ -21,10 +42,11 @@ O script fará tudo automaticamente:
 3. Avisa que a Steam será fechada e pede confirmação
 4. Faz **backup automático** antes de modificar
 5. Fecha a Steam graceful (`steam -shutdown`) antes de gravar
-6. Classifica os jogos e grava o `cloud-storage-namespace-1.json`
-7. **Remove coleções órfãs** (antigas que não fazem mais parte da nova organização)
-8. **Valida o JSON gravado** para garantir integridade
-9. Oferece reiniciar a Steam no final
+6. Classifica os jogos em **paralelo** (`ThreadPoolExecutor`)
+7. Grava o `cloud-storage-namespace-1.json` com **rollback automático** em caso de falha
+8. **Remove coleções órfãs** (antigas que não fazem mais parte da nova organização)
+9. **Valida o JSON gravado** para garantir integridade
+10. Oferece reiniciar a Steam no final
 
 ## O que ele organiza
 
