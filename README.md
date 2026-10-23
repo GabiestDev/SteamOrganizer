@@ -68,7 +68,8 @@ Categorias disponíveis (personalizáveis):
 - Trilhas & Vídeos, VR, Outros
 
 Plus:
-- **Franquias 📂** — coleção pai com todos os jogos de franquias detectadas (Resident Evil, Half-Life, Fallout, GTA, Warhammer, Counter-Strike, etc.)
+- **Franquias 📂** — coleção pai com todos os jogos de franquias (união)
+- **🧟 Resident Evil**, **🧪 Half-Life**, **🧱 LEGO**, etc. — coleções individuais por franquia (apenas ícone + nome, sem prefixo "Franquia:")
 - **Instalados localmente** — fica sempre no topo
 
 ## Funcionamento

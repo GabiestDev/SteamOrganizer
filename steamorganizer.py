@@ -642,24 +642,33 @@ def main():
             continue
         final_groups.setdefault(nome_exibicao, set()).update(appids)
 
-    # Franquias
+    # Franquias individuais (sem prefixo "Franquia:", apenas ícone + nome)
+    franchise_cols = {}
     if criar_fam:
-        franchise_apps = set()
-        for r in rows:
-            if r.get('apptype', 1) not in (1, 2):
-                continue
-            aid = int(r['appid'])
-            if aid in hidden:
-                continue
-            name = (r.get('name') or '').replace('®','').replace('™','')
-            if BAD_FRANCHISE_APP.search(name):
-                continue
-            for fname, pat, emoji in FRANCHISES:
+        for fname, pat, emoji in FRANCHISES:
+            apps = set()
+            for r in rows:
+                if r.get('apptype', 1) not in (1, 2):
+                    continue
+                aid = int(r['appid'])
+                if aid in hidden:
+                    continue
+                name = (r.get('name') or '').replace('®','').replace('™','')
+                if BAD_FRANCHISE_APP.search(name):
+                    continue
                 if re.search(pat, name, re.IGNORECASE):
-                    franchise_apps.add(aid)
-                    break
-        if franchise_apps:
-            final_groups[nome_fam] = franchise_apps
+                    apps.add(aid)
+            if len(apps) >= 2:
+                col_name = f"{emoji} {fname}"
+                franchise_cols[col_name] = apps
+                final_groups[col_name] = apps
+
+        # Coleção pai (união de todas as franquias)
+        all_franchise_apps = set()
+        for apps in franchise_cols.values():
+            all_franchise_apps.update(apps)
+        if all_franchise_apps:
+            final_groups[nome_fam] = all_franchise_apps
 
     # Ordem de gravação
     ORDER = []
@@ -668,6 +677,10 @@ def main():
         nome = cat_nomes[interno] + ' ' + cat_emojis[interno]
         if nome in final_groups:
             ORDER.append(nome)
+    # Coleções individuais de franquia (ícone + nome, sem "Franquia:")
+    for col_name in franchise_cols:
+        if col_name in final_groups:
+            ORDER.append(col_name)
     if criar_fam and nome_fam in final_groups:
         ORDER.append(nome_fam)
     if criar_inst:
