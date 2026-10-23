@@ -489,7 +489,26 @@ def build_library_fast(appinfo_path, lc_path):
 # Principal
 # =============================================================================
 
+def ensure_deps():
+    """Tenta instalar dependências Python automaticamente (vdf, websocket-client)."""
+    for pkg in ["vdf", "websocket-client"]:
+        try:
+            __import__(pkg.replace("-", "_"))
+        except ImportError:
+            print(f"Instalando dependência: {pkg} ...")
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", pkg, "--quiet"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                print(f"  {pkg} instalado com sucesso.")
+            except Exception as e:
+                print(f"  Não foi possível instalar {pkg}: {e}")
+                print(f"  Rode manualmente: pip install {pkg}")
+
+
 def main():
+    ensure_deps()
     print("=== steamorganizer — Organizador de Biblioteca Steam (pt-BR) ===\n")
 
     steam_paths = detect_steam_paths()
