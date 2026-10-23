@@ -6,7 +6,7 @@ config.ini
 
 # Backup temporário do steamorganizer
 /tmp/steamorganizer_backup_*
-/tmp/funnie_backup_*
+
 
 # Python
 __pycache__/
