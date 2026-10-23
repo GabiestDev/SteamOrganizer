@@ -41,11 +41,14 @@ O script fará tudo automaticamente:
    - Modo rápido (apenas jogos com tempo de jogo) ou **completo** (todos, incluindo família/empréstimo)
    - Quais categorias criar (todas marcadas por padrão)
    - Nome e emoji personalizados para cada categoria
-   - Coleção pai **Franquias** (união de jogos de mesma franquia)
+   - Coleções individuais por franquia (apenas ícone + nome)
+   - Coleção pai **Franquias** (união de todas)
    - Coleção **Instalados localmente no topo**
-3. Faz **backup automático** antes de modificar
-4. Fecha a Steam, classifica os jogos e grava o `cloud-storage-namespace-1.json`
-5. Oferece reiniciar a Steam no final
+3. Avisa que a Steam será fechada e pede confirmação
+4. Faz **backup automático** antes de modificar
+5. Fecha a Steam graceful (`steam -shutdown`) antes de gravar
+6. Classifica os jogos e grava o `cloud-storage-namespace-1.json`
+7. Oferece reiniciar a Steam no final
 
 ## Gerar executável .exe (Windows)
 

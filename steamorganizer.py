@@ -490,8 +490,8 @@ def build_library_fast(appinfo_path, lc_path):
 # =============================================================================
 
 def ensure_deps():
-    """Tenta instalar dependências Python automaticamente (vdf, websocket-client)."""
-    for pkg in ["vdf", "websocket-client"]:
+    """Tenta instalar dependências Python automaticamente (vdf, websocket-client, psutil)."""
+    for pkg in ["vdf", "websocket-client", "psutil"]:
         try:
             __import__(pkg.replace("-", "_"))
         except ImportError:
@@ -505,6 +505,66 @@ def ensure_deps():
             except Exception as e:
                 print(f"  Não foi possível instalar {pkg}: {e}")
                 print(f"  Rode manualmente: pip install {pkg}")
+
+
+def steam_is_running():
+    """Verifica se o processo Steam está rodando."""
+    try:
+        import psutil
+        for proc in psutil.process_iter(['name']):
+            name = proc.info['name'] or ''
+            if 'steam' in name.lower():
+                return True
+    except ImportError:
+        pass
+    # Fallback: tenta pgrep no Linux ou tasklist no Windows
+    try:
+        if is_windows():
+            result = subprocess.run(
+                ['tasklist', '/FI', 'IMAGENAME eq steam.exe'],
+                capture_output=True, text=True
+            )
+            return 'steam.exe' in result.stdout.lower()
+        else:
+            result = subprocess.run(
+                ['pgrep', '-f', 'steam'],
+                capture_output=True, text=True
+            )
+            return bool(result.stdout.strip())
+    except Exception:
+        return False
+
+
+def shutdown_steam():
+    """Fecha a Steam gracefully e espera o processo encerrar."""
+    if not steam_is_running():
+        print("Steam não está rodando. Prosseguindo...")
+        return True
+
+    print("\n⚠  AVISO: A Steam será FECHADA agora para evitar sobrescrita do arquivo.")
+    print("     Salve qualquer coisa que esteja fazendo nela antes de continuar.\n")
+    if not ask_confirm("Fechar a Steam agora e continuar?", default=True):
+        print("Cancelado pelo usuário.")
+        return False
+
+    print("Enviando steam -shutdown...")
+    try:
+        subprocess.run(
+            [shutil.which("steam") or ("steam.exe" if is_windows() else "/usr/bin/steam"), "-shutdown"],
+            capture_output=True, timeout=30
+        )
+    except Exception as e:
+        print(f"Não foi possível executar steam -shutdown: {e}")
+
+    # Aguarda encerrar
+    for i in range(30):
+        if not steam_is_running():
+            print("Steam fechada com sucesso.")
+            return True
+        time.sleep(1)
+
+    print("Aviso: a Steam pode ainda estar fechando. Prosseguindo mesmo assim.")
+    return True
 
 
 def main():
@@ -590,6 +650,10 @@ def main():
     print("   Backup será feito automaticamente.")
     if not ask_confirm("Fechar Steam e aplicar agora?", default=True):
         print("Cancelado.")
+        return
+
+    # Fecha a Steam antes de tocar no arquivo
+    if not shutdown_steam():
         return
 
     # Backup
@@ -751,6 +815,18 @@ def main():
         print(f"  {len(final_groups.get(name, set())):4d}  {name}")
     print(f"\nBackup: {backup_dir}")
     print("\nConcluído! Reinicie a Steam para ver as coleções.")
+
+    # Reiniciar Steam opcionalmente
+    if ask_confirm("Reiniciar a Steam agora?", default=True):
+        print("Iniciando Steam...")
+        try:
+            subprocess.Popen(
+                [shutil.which("steam") or ("steam.exe" if is_windows() else "/usr/bin/steam")],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except Exception as e:
+            print(f"Não foi possível iniciar a Steam automaticamente: {e}")
+            print("Inicie a Steam manualmente.")
 
 
 if __name__ == '__main__':
