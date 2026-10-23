@@ -6,32 +6,27 @@ Organizador de biblioteca Steam em português (pt-BR). Script único em **Python
 
 - Python 3
 - `gum` (opcional — interface interativa; se não tiver, usa `input()` normalmente)
-- `vdf` e `websocket-client` (para o modo completo)
+- `vdf` e `websocket-client` (instalados automaticamente no primeiro uso se faltarem)
 
 ### Instalar dependências
 
-**Windows:**
+O script tenta instalar sozinho `vdf` e `websocket-client` via `pip` no startup. Se não conseguir, rode manualmente:
+
 ```powershell
+# Windows
 pip install vdf websocket-client
 ```
 
-**Linux (Fedora / RHEL):**
 ```bash
-sudo dnf install gum python3 steam
+# Linux
 pip install vdf websocket-client
 ```
 
-**Linux (Ubuntu / Debian):**
-```bash
-sudo apt install gum python3 steam
-pip install vdf websocket-client
-```
+Para usar a interface interativa com `gum`, instale-o no seu sistema (não é instalável via pip):
 
-**Linux (Arch / CachyOS):**
-```bash
-sudo pacman -S gum python steam
-pip install vdf websocket-client
-```
+- **Fedora / RHEL:** `sudo dnf install gum`
+- **Ubuntu / Debian:** `sudo apt install gum`
+- **Arch / CachyOS:** `sudo pacman -S gum`
 
 ## Uso
 
