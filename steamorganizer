@@ -1,0 +1,660 @@
+#!/usr/bin/env bash
+# =============================================================================
+# steamorganizer — Organizador de Biblioteca Steam (pt-BR)
+# Executável único para Linux (Fedora, Ubuntu, Arch, CachyOS, Debian, etc.)
+# Requisitos: bash, gum, python3, steam
+# Uso: chmod +x steamorganizer && ./steamorganizer
+# =============================================================================
+set -euo pipefail
+
+###############################################################################
+# 0. Dependências
+###############################################################################
+for cmd in gum python3 steam; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "Dependência faltando: $cmd"
+        echo "Instale antes (ex: sudo dnf install gum python3 steam  ou  sudo apt install gum python3 steam)"
+        exit 1
+    fi
+done
+
+TMPDIR="${TMPDIR:-/tmp}"
+WORKDIR="$(mktemp -d "$TMPDIR/steamorganizer.XXXXXX")"
+trap 'rm -rf "$WORKDIR"' EXIT
+
+###############################################################################
+# 1. Detectar instalação Steam
+###############################################################################
+detect_steam_paths() {
+    local found=()
+    local candidates=(
+        "$HOME/.local/share/Steam"
+        "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+        "$HOME/snap/steam/common/.local/share/Steam"
+        "$HOME/.steam/steam"
+        "$HOME/.steam/root"
+    )
+    for c in "${candidates[@]}"; do
+        [ -d "$c" ] && found+=("$c")
+    done
+    if [ ${#found[@]} -eq 0 ]; then
+        echo ""
+    elif [ ${#found[@]} -eq 1 ]; then
+        echo "${found[0]}"
+    else
+        gum choose --header "Múltiplas instalações Steam encontradas. Escolha uma:" "${found[@]}"
+    fi
+}
+
+STEAM_PATH="$(detect_steam_paths)"
+if [ -z "$STEAM_PATH" ]; then
+    STEAM_PATH=$(gum input --placeholder "Caminho manual da Steam" --value "$HOME/.local/share/Steam")
+fi
+
+# Encontrar cloud-storage-namespace-1.json
+CS_CANDIDATES=$(ls -1 "$STEAM_PATH"/userdata/*/config/cloudstorage/cloud-storage-namespace-1.json 2>/dev/null | head -5 || true)
+if [ -z "$CS_CANDIDATES" ]; then
+    gum style --foreground 1 "cloud-storage-namespace-1.json não encontrado em $STEAM_PATH"
+    exit 1
+fi
+
+if [ "$(echo "$CS_CANDIDATES" | wc -l)" -gt 1 ]; then
+    CS=$(echo "$CS_CANDIDATES" | gum choose --header "Vários usuários (userdata). Escolha o da conta logada:")
+else
+    CS=$(echo "$CS_CANDIDATES" | head -1)
+fi
+
+STEAM_USERDIR="$(dirname "$(dirname "$CS")")"
+STEAM_ID="$(basename "$STEAM_USERDIR")"
+LC="$STEAM_USERDIR/config/localconfig.vdf"
+APPINFO="$STEAM_PATH/appcache/appinfo.vdf"
+
+gum style --foreground 2 "Steam: $STEAM_PATH"
+gum style --foreground 6 "Usuário: $STEAM_ID"
+
+###############################################################################
+# 2. Perguntas no STARTUP (tudo antes de tocar em nada)
+###############################################################################
+gum style --foreground 5 --bold "=== Configuração do steamorganizer ==="
+echo
+
+# Modo biblioteca
+MODO_BIBLIOTECA=$(gum choose \
+    --header "Como montar a lista de jogos?" \
+    --default 2 \
+    "Rápida (localconfig.vdf — só jogos com tempo/config)" \
+    "Completa (abre Steam com debug e captura TODOS, inclui família/empréstimo)")
+USE_FULL="false"
+echo "$MODO_BIBLIOTECA" | grep -q "Completa" && USE_FULL="true"
+
+# Definições de categoria: display|interno|emoji|default_ativo
+mapfile -t CAT_RAW < <(printf '%s\n' \
+"Ação 🎯|acao|🎯|1" \
+"Aventura 🌍|aventura|🌍|1" \
+"Cartas & Tabuleiro 🃏|cartas|🃏|1" \
+"Casual & Puzzle 🧩|casual|🧩|1" \
+"Co-op 🤝|coop|🤝|1" \
+"Competitivo ⚔️|competitivo|⚔️|1" \
+"Corrida 🚗|corrida|🚗|1" \
+"Demos & Betas 🧪|demos|🧪|1" \
+"Esportes ⚽|esportes|⚽|1" \
+"Estratégia 🧠|estrategia|🧠|1" \
+"Ferramentas 🛠️|ferramentas|🛠️|1" \
+"Indie & Retrô 🕹️|indie|🕹️|1" \
+"Jogando Agora ▶️|jogando|▶️|1" \
+"Luta 🥊|luta|🥊|1" \
+"MMO 🌐|mmo|🌐|1" \
+"RPG 🗡️|rpg|🗡️|1" \
+"Simulação 🏗️|simulacao|🏗️|1" \
+"Sobrevivência 🌲|sobrevivencia|🌲|1" \
+"Terror 👻|terror|👻|1" \
+"Trilhas & Vídeos 🎬|trilhas|🎬|1" \
+"VR 🥽|vr|🥽|1" \
+"Outros 📁|outros|📁|1")
+
+# Escolher categorias ativas
+SELECIONADAS=$(gum choose \
+    --header "Quais categorias criar? (espaço = marcar, enter = confirmar)" \
+    --default="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21" \
+    --limit=0 --height=26 \
+    "${CAT_RAW[@]}")
+
+declare -A CAT_ATIVA CAT_NOME CAT_EMOJI
+for line in "${CAT_RAW[@]}"; do
+    IFS='|' read -r display interno emoji default <<< "$line"
+    CAT_ATIVA["$interno"]="0"
+    if echo "$SELECIONADAS" | grep -qF "$display"; then
+        CAT_ATIVA["$interno"]="1"
+        def_nome="$display"
+        def_emoji="$emoji"
+        novo_nome=$(gum input --header "Nome para '$display'" --value "$def_nome")
+        novo_emoji=$(gum input --header "Emoji para '$interno'" --value "$def_emoji")
+        CAT_NOME["$interno"]="$novo_nome"
+        CAT_EMOJI["$interno"]="$novo_emoji"
+    fi
+done
+
+# Coleção pai Franquias
+CRIAR_FAMILIAS="1"
+NOME_FAMILIAS="Franquias 📂"
+if gum confirm --default true --header "Criar coleção pai 'Franquias' (união dos jogos de mesma franquia)?"; then
+    CRIAR_FAMILIAS="1"
+    NOME_FAMILIAS=$(gum input --header "Nome da coleção pai de franquias" --value "$NOME_FAMILIAS")
+else
+    CRIAR_FAMILIAS="0"
+fi
+
+# Coleção instalados localmente
+CRIAR_INSTALADOS="1"
+NOME_INSTALADOS="📦 Instalados localmente"
+if gum confirm --default true --header "Deixar 'Instalados localmente' no topo da lista?"; then
+    CRIAR_INSTALADOS="1"
+    NOME_INSTALADOS=$(gum input --header "Nome da coleção de instalados" --value "$NOME_INSTALADOS")
+else
+    CRIAR_INSTALADOS="0"
+fi
+
+echo
+gum style --foreground 1 --bold "⚠  A Steam será FECHADA e o arquivo cloud-storage será reescrito."
+gum style --foreground 6 "O script faz backup automático antes de modificar."
+if ! gum confirm --default true --header "Fechar Steam e aplicar agora?"; then
+    echo "Cancelado."
+    exit 0
+fi
+
+###############################################################################
+# 3. Gerar helper Python embutido
+###############################################################################
+HELPER="$WORKDIR/classify.py"
+
+cat > "$HELPER" <<'PYEOF'
+import json, os, re, random, time, secrets, string, shutil, socket, sys
+
+STEAM_PATH  = os.environ["STEAMORG_STEAM_PATH"]
+STEAM_ID    = os.environ["STEAMORG_STEAM_ID"]
+USE_FULL    = os.environ.get("STEAMORG_USE_FULL", "false") == "true"
+CS          = os.environ["STEAMORG_CS"]
+LC          = os.environ["STEAMORG_LC"]
+APPINFO     = os.environ["STEAMORG_APPINFO"]
+NOME_INSTAL = os.environ.get("STEAMORG_NOME_INSTALADOS", "📦 Instalados localmente")
+CRIAR_INSTAL= os.environ.get("STEAMORG_CRIAR_INSTALADOS", "true") == "true"
+CRIAR_FAM   = os.environ.get("STEAMORG_CRIAR_FAMILIAS", "true") == "true"
+NOME_FAM    = os.environ.get("STEAMORG_NOME_FAMILIAS", "Franquias 📂")
+CATS_JSON   = os.environ.get("STEAMORG_CATS_JSON", "{}")
+CATS        = json.loads(CATS_JSON)
+
+BACKUP = "/tmp/steamorganizer_backup_" + time.strftime("%Y%m%d_%H%M%S")
+os.makedirs(BACKUP, exist_ok=True)
+
+def backup(p):
+    if os.path.exists(p):
+        shutil.copy2(p, os.path.join(BACKUP, os.path.basename(p)))
+
+# ---------- protobuf wire parser ----------
+def varint(b, i):
+    r = s = 0
+    while True:
+        c = b[i]; i += 1
+        r |= (c & 0x7f) << s
+        if not c & 0x80: return r, i
+        s += 7
+
+def fields(b):
+    i, out = 0, []
+    while i < len(b):
+        k, i = varint(b, i)
+        f, w = k >> 3, k & 7
+        if w == 0:
+            v, i = varint(b, i)
+        elif w == 2:
+            l, i = varint(b, i); v = b[i:i+l]; i += l
+        elif w == 5:
+            v = int.from_bytes(b[i:i+4], 'little'); i += 4
+        elif w == 1:
+            v = int.from_bytes(b[i:i+8], 'little'); i += 8
+        else:
+            raise ValueError(w)
+        out.append((f, w, v))
+    return out
+
+def parse_overview_pb(path):
+    b = open(path, 'rb').read()
+    apps = []
+    for f, w, v in fields(b):
+        if f == 1 and w == 2:
+            d = {}; tags = []
+            for ff, ww, vv in fields(v):
+                if ff == 19 and ww == 0: tags.append(vv)
+                elif ff == 2 and ww == 2: d['name'] = vv.decode('utf-8','replace')
+                elif ff in (1,4,5,7,8,9,10,11,12,13,14,16,17,18,20,21,22,26,27,31,36,37,46,53,54,55,56,65,66,68,73,77,79,80) and ww == 0:
+                    d[ff] = vv
+            d['appid'] = d.get(1)
+            d['tags'] = [int(x) for x in tags]
+            apps.append(d)
+    return apps
+
+# ---------- tag names ----------
+TAG_NAMES = {
+    19:"Action",21:"Adventure",23:"Casual",25:"Indie",27:"Massively Multiplayer",
+    29:"Racing",30:"RPG",31:"Simulation",32:"Sports",33:"Strategy",
+    103:"Fighting",113:"MOBA",114:"Auto Battler",1718:"MOBA",1774:"FPS",
+    1663:"FPS",3859:"Shooter",5711:"Tactical",3878:"Competitive",5055:"Co-op",
+    492:"Indie",9:"Puzzle",1685:"Horror",1676:"Survival",4747:"Crafting",
+    4711:"Open World",4231:"Story Rich",599:"Visual Novel",1775:"Point & Click",
+    1645:"Walking Simulator",1684:"Choices Matter",3843:"Sandbox",
+    1718:"Battle Royale",122:"Card Game",1708:"Deckbuilding",
+}
+for tf in [os.path.expanduser("~/.local/share/Steam/steamui/tagnames.json"),
+           os.path.join(STEAM_PATH,"steamui","tagnames.json")]:
+    if os.path.exists(tf):
+        try:
+            for k,v in json.load(open(tf)).items():
+                TAG_NAMES[int(k)] = v
+        except Exception: pass
+try:
+    import urllib.request
+    for t in json.loads(urllib.request.urlopen("https://store.steampowered.com/tagdata/populartags/english", timeout=8).read().decode()):
+        TAG_NAMES[int(t['tagid'])] = t['name']
+except Exception: pass
+
+def tnames(ids):
+    return [TAG_NAMES.get(i, f"tag_{i}") for i in ids]
+
+# ---------- regras de classificação ----------
+CAT_MAP = {
+    '🥊 Luta': {'Fighting','2D Fighter','3D Fighter'},
+    '🚗 Corrida': {'Racing','Driving','Combat Racing','Automobile Sim','Motocross','Offroad'},
+    '⚽ Esportes': {'Sports','Football (Soccer)','Football (American)','Basketball','Baseball','Tennis','Golf','Bowling','Skateboarding','Snowboarding','Hockey','Wrestling','Boxing','Cricket','Rugby','Volleyball','Billiards','Pool','Mini Golf','Snooker','Skiing','Cycling'},
+    '🃏 Cartas & Tabuleiro': {'Card Game','Trading Card Game','Card Battler','Deckbuilding','Roguelike Deckbuilder','Board Game','Tabletop','Chess','Solitaire','Mahjong'},
+    '👻 Terror': {'Horror','Survival Horror','Psychological Horror','Zombies','Lovecraftian','Jump Scare'},
+    '🌐 MMO': {'MMORPG','Massively Multiplayer'},
+    '🧠 Estratégia': {'Strategy','RTS','Turn-Based Strategy','4X','Grand Strategy','MOBA','Auto Battler','Tower Defense','Turn-Based Tactics','Real Time Tactics','Wargame','Political Sim'},
+    '🏗️ Simulação': {'Simulation','Farming Sim','Life Sim','Management','City Builder','Colony Sim','Automation','Base Building','Building','Space Sim','God Game','Economy','Job Simulator','Hobby Sim','Medical Sim'},
+    '🌲 Survival & Craft': {'Survival','Open World Survival Craft','Crafting'},
+    '🗡️ RPG': {'RPG','Action RPG','JRPG','CRPG','Party-Based RPG','Strategy RPG','Tactical RPG','Souls-like','Dungeon Crawler','Roguelike','Roguelite','Traditional Roguelike','Loot'},
+    '🌍 Aventura': {'Adventure','Action-Adventure','Exploration','Story Rich','Walking Simulator','Visual Novel','Point & Click','Choices Matter','Sandbox','Open World'},
+    '🎯 Ação': {'Action','Shooter','FPS','Third-Person Shooter','Hack and Slash',"Beat 'em up","Shoot 'Em Up",'Arena Shooter','Boomer Shooter','Twin Stick Shooter','Bullet Hell','Action Roguelike','Spectacle fighter','Character Action Game','Combat','Swordplay','Martial Arts','Looter Shooter','Extraction Shooter','Vehicular Combat'},
+    '🧩 Casual & Puzzle': {'Casual','Puzzle','Hidden Object','Match 3','Trivia','Word Game','Relaxing','Cozy','Idler','Incremental','Clicker','Party Game','Minigames','Logic','Sokoban','Social Deduction'},
+    '🕹️ Indie & Retrô': {'Indie','Pixel Graphics','Retro','2D','Platformer','2D Platformer','3D Platformer','Precision Platformer','Puzzle Platformer','Metroidvania','Side Scroller','Arcade','Classic','Old School',\"1990's\",'1980s'},
+}
+TAG2CAT = {t: c for c, ts in CAT_MAP.items() for t in ts}
+COOP = {'Co-op','Online Co-Op','Local Co-Op','Co-op Campaign','4 Player Local'}
+PVP = {'PvP','Competitive','eSports','Battle Royale','MOBA','Hero Shooter','Team-Based'}
+
+MANUAL = {
+ '620':'🧩 Casual & Puzzle','227300':'🏗️ Simulação','480':'🎯 Ação','570':'🧠 Estratégia','730':'🎯 Ação',
+ '359550':'🎯 Ação','292030':'🗡️ RPG','1091500':'🗡️ RPG','1174180':'🌍 Aventura','271590':'🌍 Aventura',
+ '413150':'🏗️ Simulação','427520':'🏗️ Simulação','105600':'🌲 Survival & Craft','4000':'🧩 Casual & Puzzle',
+ '252490':'🌲 Survival & Craft','578080':'🎯 Ação','1245620':'🗡️ RPG','892970':'🌲 Survival & Craft',
+ '548430':'🎯 Ação','553850':'🎯 Ação','2357570':'🎯 Ação','2767030':'🎯 Ação','2141910':'🃏 Cartas & Tabuleiro',
+ '599140':'🏗️ Simulação','1286830':'🌐 MMO','1085660':'🎯 Ação','1623730':'🌲 Survival & Craft','275850':'🌲 Survival & Craft',
+ '1118310':'🛠️ Ferramentas','205190':'🧩 Casual & Puzzle','71340':'🕹️ Indie & Retrô',
+ '202970':'🎯 Ação','202990':'🎯 Ação','212910':'🎯 Ação','218640':'👻 Terror','349040':'🥊 Luta',
+ '407740':'🎯 Ação','438740':'👻 Terror','582160':'🌍 Aventura','637650':'🗡️ RPG','946610':'🎯 Ação',
+ '1189780':'🎯 Ação','1208030':'🧩 Casual & Puzzle','1237980':'🎯 Ação','2675290':'🎯 Ação','2827200':'👻 Terror',
+ '2920570':'🧩 Casual & Puzzle','3432970':'⚽ Esportes','4332910':'🧩 Casual & Puzzle',
+ '457930':'🎯 Ação','457940':'🎯 Ação','473620':'🎯 Ação','473630':'🎯 Ação','473650':'🎯 Ação',
+ '475240':'🎯 Ação','486340':'🎯 Ação','491250':'🎯 Ação','473580':'🃏 Cartas & Tabuleiro','974100':'🧩 Casual & Puzzle',
+ '1657270':'📁 Outros','506770':'📁 Outros','3778240':'📁 Outros',
+ '12100':'🎮 Grand Theft Auto','12230':'🎮 Grand Theft Auto','12120':'🎮 Grand Theft Auto','12250':'🎮 Grand Theft Auto','12110':'🎮 Grand Theft Auto',
+}
+
+FRANCHISES = [
+    ('Resident Evil', r'\bresident evil\b|\bbiohazard\b|\bumbrella corps\b', '🧟'),
+    ('Half-Life', r'\bhalf-?life\b|\bblack mesa\b', '🧪'),
+    ('LEGO', r'\blego\b', '🧱'),
+    ('Fallout', r'\bfallout\b', '☢️'),
+    ('Warhammer', r'\bwarhammer\b', '🔨'),
+    ('Counter-Strike', r'\bcounter-?strike\b', '🔫'),
+    ('Grand Theft Auto', r'\bgrand theft auto\b|\bgta\b', '🚗'),
+    ('Batman Arkham', r'^batman\b', '🦇'),
+    ('BioShock', r'\bbioshock\b', '🌊'),
+    ('Borderlands', r'\bborderlands\b', '🚜'),
+    ('Dragon Ball', r'\bdragon ball\b', '🐲'),
+    ('Saints Row', r'\bsaints row\b', '🟣'),
+    ('Darksiders', r'\bdarksiders\b', '🐎'),
+    ('Dead Rising', r'\bdead rising\b', '🧟'),
+    ('Age of Empires', r'\bage of empires\b', '🏰'),
+    ('Dark Souls', r'\bdark souls\b', '🔥'),
+    ('Devil May Cry', r'\bdevil may cry\b|\bdmc\b', '😈'),
+    ('Final Fantasy', r'\bfinal fantasy\b', '🧝'),
+    ('Mafia', r'^mafia\b', '🕴️'),
+    ('Metro', r'\bmetro (2033|last light|exodus|redux)\b', '☢️'),
+    ('Penumbra', r'\bpenumbra\b', '🔦'),
+    ('Beholder', r'\bbeholder\b', '👁️'),
+    ('Hitman', r'^hitman\b', '🕴️'),
+    ('Metal Gear', r'\bmetal gear\b', '📦'),
+    ('Car Mechanic Simulator', r'\bcar mechanic simulator\b', '🔧'),
+    ('Death Stranding', r'\bdeath stranding\b', '📦'),
+    ('Deus Ex', r'\bdeus ex\b', '🔺'),
+    ('Dishonored', r'\bdishonored\b', '🎭'),
+    ('F1', r'\bf1 (19|20)\d\d\b|\bf1 2[0-9]\b', '🏎️'),
+    ('Forza Horizon', r'\bforza\b', '🏎️'),
+    ('Monster Hunter', r'\bmonster hunter\b', '🐲'),
+    ('The Elder Scrolls', r'\belder scrolls\b|\bskyrim\b|\bmorrowind\b|\boblivion\b', '📜'),
+    ('The Witcher', r'\bwitcher\b', '🐺'),
+    ('Tomb Raider', r'\btomb raider\b|\blara croft\b', '🏺'),
+    ('Train Simulator', r'\btrain sim(ulator)?\b', '🚆'),
+    ('Wolfenstein', r'\bwolfenstein\b', '🐺'),
+    ('Wargame', r'\bwargame\b', '🗺️'),
+    ('Subnautica', r'\bsubnautica\b', '🌊'),
+    ('Space Pilgrim', r'\bspace pilgrim\b', '🚀'),
+    ('Call of Duty', r'\bcall of duty\b', '🎖️'),
+]
+
+BAD_FRANCHISE_APP = re.compile(r'test server|public test|open beta|\bbeta\b|experimental|bonus content|soundtrack|\bdemo\b|playtest', re.IGNORECASE)
+
+def classify(app):
+    t = app.get('apptype', 1)
+    tags = app.get('tags', [])
+    tnames = tag_names(tags)
+    top = set(tnames[:8])
+
+    if t == 4: return ['🛠️ Ferramentas']
+    if t in (8, 65536): return ['🧪 Demos & Betas']
+    if t in (2, 256): return ['🛠️ Ferramentas']
+    if t in (2048, 8192): return ['🎬 Trilhas & Vídeos']
+
+    aid = str(app.get('appid'))
+    if aid in MANUAL:
+        cols = [MANUAL[aid]]
+    elif 'MMORPG' in tnames[:3]:
+        cols = ['🌐 MMO']
+    else:
+        cols = ['📁 Outros']
+        for x in tnames:
+            if x in TAG2CAT:
+                cols = [TAG2CAT[x]]
+                break
+
+    if top & COOP: cols.append('🤝 Co-op')
+    if top & PVP: cols.append('⚔️ Competitivo')
+    if 'VR' in tags or 'VR' in tnames: cols.append('🥽 VR')
+    if 'Indie' in tnames and '🕹️ Indie & Retrô' not in cols: cols.append('🕹️ Indie & Retrô')
+    if app.get('installed', False): cols.append('📦 Instalados')
+    now = time.time()
+    if app.get('play2w', 0) > 0 or (app.get('lastplayed', 0) and now - app['lastplayed'] < 30*86400 and app.get('playtime', 0) > 0):
+        cols.append('▶️ Jogando Agora')
+    return list(dict.fromkeys(cols))
+
+# ---------- bibliotecas ----------
+def build_library_full():
+    """Captura biblioteca completa via CEF debug (requer Steam rodando com -cef-enable-debugging)."""
+    steam_bin = shutil.which("steam") or "/usr/bin/steam"
+    env = os.environ.copy()
+    marker = "/tmp/steamorganizer_debug_marker"
+    if not os.path.exists(marker):
+        subprocess.Popen([steam_bin, "-cef-enable-debugging"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(30):
+            s = socket.socket()
+            try:
+                s.connect(("127.0.0.1", 8080)); s.close(); break
+            except Exception:
+                time.sleep(1)
+        open(marker, "w").close()
+
+    try:
+        import websocket
+    except ImportError:
+        print("websocket-client não instalado. Use: pip install websocket-client")
+        return []
+
+    buf = {"data": None}
+    def on_message(ws, message):
+        m = json.loads(message)
+        if m.get('id') == 1 and 'result' in m:
+            buf['data'] = m['result']['result']['value']
+            ws.close()
+
+    def on_open(ws):
+        expr = ("window.__ovbuf=null;SteamClient.Apps.RegisterForAppOverviewChanges(b=>{window.__ovbuf=b});"
+                "setTimeout(()=>{},2500)")
+        ws.send(json.dumps({"id":1,"method":"Runtime.evaluate","params":{"expression":expr,"returnByValue":True,"awaitPromise":True}}))
+
+    ws = websocket.WebSocketApp("ws://127.0.0.1:8080/devtools/page/placeholder", on_open=on_open, on_message=on_message)
+    # Precisamos do URL real do SharedJSContext. Vamos buscar os targets primeiro.
+    import urllib.request
+    targets = json.loads(urllib.request.urlopen("http://127.0.0.1:8080/json", timeout=5).read())
+    shared = [t for t in targets if t.get('title') == 'SharedJSContext']
+    if not shared:
+        print("SharedJSContext não encontrado. Rode a Steam com -cef-enable-debugging.")
+        return []
+    ws_url = shared[0]['webSocketDebuggerUrl']
+
+    ws = websocket.WebSocketApp(ws_url, on_open=on_open, on_message=on_message)
+    ws.run_forever(timeout=10)
+
+    if buf['data'] is None:
+        return []
+
+    import base64
+    raw = base64.b64decode(buf['data'])
+    pb_path = os.path.join(BACKUP, "overview.pb")
+    open(pb_path, 'wb').write(raw)
+    apps = parse_overview_pb(pb_path)
+
+    now = time.time()
+    out = []
+    for a in apps:
+        out.append({
+            'appid': str(a.get('appid')),
+            'name': a.get('name') or '',
+            'apptype': a.get(7, 1),
+            'tags': a.get('tags', []),
+            'installed': (a.get(37, 0) or 0) > 0,
+            'playtime': a.get(16, 0) or 0,
+            'play2w': a.get(17, 0) or 0,
+            'lastplayed': a.get(14, 0) or 0,
+        })
+    return out
+
+def build_library_fast():
+    """Constrói a partir do appinfo.vdf + localconfig (mais rápido, menos completo)."""
+    try:
+        import vdf
+    except ImportError:
+        print("módulo vdf não instalado. pip install vdf")
+        return []
+
+    apps_data = {}
+    try:
+        ai = vdf.load(open(APPINFO, encoding='utf-8', errors='replace'))
+        for appid, app in ai.get('apps', {}).items():
+            common = app.get('common', {})
+            apps_data[appid] = {
+                'appid': appid,
+                'name': common.get('name', ''),
+                'apptype': 1,
+                'tags': app.get('store_tags', []) or [],
+                'installed': False,
+                'playtime': 0,
+                'play2w': 0,
+                'lastplayed': 0,
+            }
+    except Exception as e:
+        print(f"appinfo.vdf não lido: {e}")
+
+    try:
+        lc = vdf.load(open(LC, encoding='utf-8', errors='replace'))
+        userapps = lc.get('UserLocalConfigStore', {}).get('apps', {})
+        for appid, app in userapps.items():
+            if appid in apps_data:
+                apps_data[appid]['playtime'] = app.get('playtime', 0) or 0
+                apps_data[appid]['lastplayed'] = app.get('lastplayed', 0) or 0
+                apps_data[appid]['installed'] = (app.get('installed', 0) or 0) == 1
+            else:
+                apps_data[appid] = {
+                    'appid': appid,
+                    'name': app.get('name', ''),
+                    'apptype': 1,
+                    'tags': [],
+                    'installed': (app.get('installed', 0) or 0) == 1,
+                    'playtime': app.get('playtime', 0) or 0,
+                    'play2w': 0,
+                    'lastplayed': app.get('lastplayed', 0) or 0,
+                }
+    except Exception as e:
+        print(f"localconfig.vdf não lido: {e}")
+
+    return list(apps_data.values())
+
+def main():
+    backup(CS)
+    backup(LC)
+
+    if USE_FULL:
+        rows = build_library_full()
+        if not rows:
+            print("Falha ao capturar biblioteca completa. Usando modo rápido.")
+            rows = build_library_fast()
+    else:
+        rows = build_library_fast()
+
+    hidden = set()
+    try:
+        d = json.load(open(CS))
+        for e in d:
+            if e[0] == 'user-collections.hidden':
+                try:
+                    hidden = set(json.loads(e[1]['value']).get('added', []))
+                except: pass
+    except: pass
+
+    groups = {}
+    for r in rows:
+        aid = int(r['appid'])
+        if aid in hidden: continue
+        for c in classify(r):
+            groups.setdefault(c, set()).add(aid)
+
+    # Aplicar nomes customizados do usuário
+    final_groups = {}
+    for c, appids in groups.items():
+        nome_exibicao = c
+        for interno, info in CATS.items():
+            if interno in c or c.endswith(interno):
+                nome_exibicao = info.get('nome', c)
+                break
+        final_groups.setdefault(nome_exibicao, set()).update(appids)
+
+    # Franquias
+    if CRIAR_FAM:
+        franchise_apps = set()
+        for r in rows:
+            if r.get('apptype', 1) not in (1, 2): continue
+            aid = int(r['appid'])
+            if aid in hidden: continue
+            name = (r.get('name') or '').replace('®','').replace('™','')
+            if BAD_FRANCHISE_APP.search(name): continue
+            for fname, pat, emoji in FRANCHISES:
+                if re.search(pat, name, re.IGNORECASE):
+                    franchise_apps.add(aid); break
+        if franchise_apps:
+            final_groups[NOME_FAM] = franchise_apps
+
+    # Montar ordem de gravação
+    ORDER = []
+    for interno, info in CATS.items():
+        if info.get('ativo'):
+            ORDER.append(info.get('nome', interno) + ' ' + info.get('emoji', ''))
+    if CRIAR_FAM: ORDER.append(NOME_FAM)
+    if CRIAR_INSTAL: ORDER.append(NOME_INSTAL)
+
+    # Gravar JSON
+    d = json.load(open(CS))
+    by_key = {e[0]: e for e in d}
+    existing_by_name = {}
+    for e in d:
+        if e[0].startswith('user-collections.') and not e[1].get('is_deleted'):
+            try: v = json.loads(e[1]['value'])
+            except: continue
+            if v.get('name'): existing_by_name[v['name']] = e[0]
+
+    rnd = random.Random(int(time.time()))
+    def new_id():
+        while True:
+            k = 'uc-' + ''.join(rnd.choice(string.ascii_letters + string.digits) for _ in range(12))
+            if 'user-collections.' + k not in by_key:
+                return k
+
+    now = int(time.time())
+    created = updated = 0
+
+    for name in ORDER:
+        apps = sorted(final_groups.get(name, set()))
+        if not apps and name != NOME_INSTAL: continue
+        key = existing_by_name.get(name)
+        if key:
+            updated += 1
+        else:
+            key = 'user-collections.' + new_id(); created += 1
+        val = {'id': key.split('.', 1)[1], 'name': name, 'added': apps, 'removed': []}
+        entry = [key, {'key': key, 'timestamp': now, 'value': json.dumps(val, ensure_ascii=False, separators=(',',':')), 'version': '596'}]
+        if key in by_key:
+            idx = next(i for i,x in enumerate(d) if x[0] == key); d[idx] = entry
+        else:
+            d.append(entry)
+        by_key[key] = entry
+
+    # Renomear coleção instalados localmente se existir
+    if CRIAR_INSTAL:
+        inst_key = existing_by_name.get('Instalados localmente') or existing_by_name.get(NOME_INSTAL)
+        if inst_key and inst_key in by_key:
+            e = by_key[inst_key]
+            v = json.loads(e[1]['value'])
+            v['name'] = NOME_INSTAL
+            e[1]['value'] = json.dumps(v, ensure_ascii=False, separators=(',',':'))
+            e[1]['timestamp'] = now
+
+    tmp = CS + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(d, f, ensure_ascii=False)
+    os.replace(tmp, CS)
+
+    print(f"BACKUP: {BACKUP}")
+    print(f"Criadas: {created}, Atualizadas: {updated}")
+    print(f"Total jogos classificados: {len(rows)}")
+    for name in ORDER:
+        print(f"  {len(final_groups.get(name, set())):4d}  {name}")
+
+if __name__ == '__main__':
+    main()
+PYEOF
+
+# Montar JSON de categorias para passar ao Python
+CATS_JSON='{}'
+for interno in "${!CAT_ATIVA[@]}"; do
+    if [ "${CAT_ATIVA[$interno]}" = "1" ]; then
+        nome="${CAT_NOME[$interno]:-}"
+        emoji="${CAT_EMOJI[$interno]:-}"
+        CATS_JSON=$(echo "$CATS_JSON" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+d['$interno']={'nome':'''$nome''','emoji':'''$emoji''','ativo':True}
+print(json.dumps(d))
+")
+    fi
+done
+
+export STEAMORG_STEAM_PATH="$STEAM_PATH"
+export STEAMORG_STEAM_ID="$STEAM_ID"
+export STEAMORG_USE_FULL="$USE_FULL"
+export STEAMORG_CS="$CS"
+export STEAMORG_LC="$LC"
+export STEAMORG_APPINFO="$APPINFO"
+export STEAMORG_NOME_INSTALADOS="$NOME_INSTALADOS"
+export STEAMORG_CRIAR_INSTALADOS="$CRIAR_INSTALADOS"
+export STEAMORG_CRIAR_FAMILIAS="$CRIAR_FAMILIAS"
+export STEAMORG_NOME_FAMILIAS="$NOME_FAMILIAS"
+export STEAMORG_CATS_JSON="$CATS_JSON"
+
+gum spin --spinner dot --title "Processando biblioteca..." -- python3 "$HELPER"
+
+rm -f "$HELPER"
+
+echo
+gum style --foreground 2 --bold "Concluído!"
+gum style --foreground 6 "Backup em: /tmp/steamorganizer_backup_*"
+if gum confirm --default true --header "Reiniciar a Steam agora?"; then
+    setsid nohup env DISPLAY=:0 WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus /usr/bin/steam >/dev/null 2>&1 </dev/null &
+fi
