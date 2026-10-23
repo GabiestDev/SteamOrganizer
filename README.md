@@ -44,11 +44,14 @@ O script fará tudo automaticamente:
    - Coleções individuais por franquia (apenas ícone + nome)
    - Coleção pai **Franquias** (união de todas)
    - Coleção **Instalados localmente no topo**
-3. Avisa que a Steam será fechada e pede confirmação
-4. Faz **backup automático** antes de modificar
-5. Fecha a Steam graceful (`steam -shutdown`) antes de gravar
-6. Classifica os jogos e grava o `cloud-storage-namespace-1.json`
-7. Oferece reiniciar a Steam no final
+3. Oferece **modo dry-run** (apenas visualizar, não grava nada)
+4. Avisa que a Steam será fechada e pede confirmação
+5. Faz **backup automático** antes de modificar
+6. Fecha a Steam graceful (`steam -shutdown`) antes de gravar
+7. Classifica os jogos e grava o `cloud-storage-namespace-1.json`
+8. **Remove coleções órfãs** (antigas que não fazem mais parte da nova organização)
+9. **Valida o JSON gravado** para garantir integridade
+10. Oferece reiniciar a Steam no final
 
 ## Gerar executável .exe (Windows)
 

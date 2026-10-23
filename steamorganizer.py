@@ -33,10 +33,79 @@ def expand_env(path):
     return Path(os.path.expandvars(str(path))).expanduser()
 
 
+def detect_steam_windows_deep():
+    """No Windows, tenta localizar a Steam via registro e varredura de unidades."""
+    found = []
+    # 1. Registro do Windows
+    try:
+        import winreg
+        for root, keypath in [
+            (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam"),
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Valve\Steam"),
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Valve\Steam"),
+        ]:
+            try:
+                with winreg.OpenKey(root, keypath) as key:
+                    try:
+                        install_path, _ = winreg.QueryValueEx(key, "InstallPath")
+                        if install_path and Path(install_path).exists():
+                            found.append(str(Path(install_path)))
+                    except FileNotFoundError:
+                        pass
+                    try:
+                        steam_exe, _ = winreg.QueryValueEx(key, "SteamExe")
+                        if steam_exe:
+                            p = Path(steam_exe).parent
+                            if p.exists():
+                                found.append(str(p))
+                    except FileNotFoundError:
+                        pass
+            except Exception:
+                pass
+    except ImportError:
+        pass
+
+    # 2. Varredura de unidades disponíveis (C:, D:, E:, etc.)
+    import string as _string
+    for letter in _string.ascii_uppercase:
+        drive = f"{letter}:"
+        if not Path(drive).exists():
+            continue
+        for sub in [
+            r"Program Files (x86)\Steam",
+            r"Program Files\Steam",
+            r"SteamLibrary\steamapps\common\..",  # fallback genérico
+            r"Steam",
+        ]:
+            p = Path(drive) / sub
+            if p.exists() and (p / "userdata").exists():
+                found.append(str(p))
+                break
+            # Também tenta SteamLibrary diretamente
+            p2 = Path(drive) / "SteamLibrary"
+            if p2.exists() and (p2 / "steamapps").exists():
+                # SteamLibrary pode não ter userdata, mas a Steam principal pode estar junto
+                p3 = Path(drive) / "Program Files (x86)" / "Steam"
+                if p3.exists() and (p3 / "userdata").exists():
+                    found.append(str(p3))
+                p4 = Path(drive) / "Program Files" / "Steam"
+                if p4.exists() and (p4 / "userdata").exists():
+                    found.append(str(p4))
+
+    # Remove duplicatas mantendo ordem
+    seen = set()
+    unique = []
+    for p in found:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
+
+
 def detect_steam_paths():
     candidates = []
     if is_windows():
-        candidates = [
+        candidates = detect_steam_windows_deep() + [
             r"%PROGRAMFILES(X86)%\Steam",
             r"%PROGRAMFILES%\Steam",
             r"%LOCALAPPDATA%\Steam",
@@ -57,7 +126,14 @@ def detect_steam_paths():
         p = expand_env(c)
         if p.exists():
             found.append(str(p))
-    return found
+    # Remove duplicatas
+    seen = set()
+    unique = []
+    for p in found:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
 
 
 def find_userdata_dirs(steam_path):
@@ -616,6 +692,8 @@ def main():
     )
     use_full = "Completa" in modo[0] if modo else False
 
+    dry_run = ask_confirm("Modo apenas visualizar (dry-run)? Não grava nada, só mostra o resumo.", default=False)
+
     cats_raw = [
         ("Ação 🎯","acao","🎯"),("Aventura 🌍","aventura","🌍"),
         ("Cartas & Tabuleiro 🃏","cartas","🃏"),("Casual & Puzzle 🧩","casual","🧩"),
@@ -648,21 +726,27 @@ def main():
 
     print("\n⚠  A Steam será FECHADA e o arquivo cloud-storage será reescrito.")
     print("   Backup será feito automaticamente.")
-    if not ask_confirm("Fechar Steam e aplicar agora?", default=True):
-        print("Cancelado.")
-        return
+    if dry_run:
+        print("\n=== MODO DRY-RUN (apenas visualizar) ===")
+    else:
+        if not ask_confirm("Fechar Steam e aplicar agora?", default=True):
+            print("Cancelado.")
+            return
 
-    # Fecha a Steam antes de tocar no arquivo
-    if not shutdown_steam():
-        return
+    # Fecha a Steam antes de tocar no arquivo (só se não for dry-run)
+    if not dry_run:
+        if not shutdown_steam():
+            return
 
-    # Backup
-    backup_dir = Path(tempfile.gettempdir()) / f"steamorganizer_backup_{time.strftime('%Y%m%d_%H%M%S')}"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(cs_file, backup_dir / cs_file.name)
-    if lc_file.exists():
-        shutil.copy2(lc_file, backup_dir / lc_file.name)
-    print(f"Backup: {backup_dir}")
+    # Backup (só se não for dry-run)
+    backup_dir = None
+    if not dry_run:
+        backup_dir = Path(tempfile.gettempdir()) / f"steamorganizer_backup_{time.strftime('%Y%m%d_%H%M%S')}"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cs_file, backup_dir / cs_file.name)
+        if lc_file.exists():
+            shutil.copy2(lc_file, backup_dir / lc_file.name)
+        print(f"Backup: {backup_dir}")
 
     # Montar biblioteca
     if use_full:
@@ -750,8 +834,22 @@ def main():
     if criar_inst:
         ORDER.append(nome_inst)
 
-    # Gravar JSON
-    d = json.load(open(cs_file, encoding='utf-8'))
+    # Resumo do que seria feito / será feito
+    print(f"\n{'='*50}")
+    print(f"RESUMO ({'DRY-RUN - nada será gravado' if dry_run else 'APLICAR'})")
+    print(f"{'='*50}")
+    print(f"Total jogos classificados: {len(rows)}")
+    print(f"Coleções a serem criadas/atualizadas: {len(ORDER)}")
+    for name in ORDER:
+        n = len(final_groups.get(name, set()))
+        print(f"  {n:4d}  {name}")
+
+    if dry_run:
+        print("\n=== MODO DRY-RUN ENCERRADO. Nenhum arquivo foi modificado. ===")
+        return
+
+    # Limpeza de coleções órfãs (melhoria 3)
+    # Remove coleções de gênero do usuário que não estão mais na ORDER
     by_key = {e[0]: e for e in d}
     existing_by_name = {}
     for e in d:
@@ -762,6 +860,29 @@ def main():
                 continue
             if v.get('name'):
                 existing_by_name[v['name']] = e[0]
+
+    orfãs_removidas = []
+    for nome_existente, key in list(existing_by_name.items()):
+        # Pula coleções do sistema
+        if key in ('user-collections.favorite', 'user-collections.hidden'):
+            continue
+        # Pula se ainda vai existir na nova ordem
+        if nome_existente in ORDER:
+            continue
+        # Se não está na nova ordem, é órfã -> marca para remover
+        orfãs_removidas.append((nome_existente, key))
+
+    for nome_existente, key in orfãs_removidas:
+        # Marca como deletada em vez de remover completamente (mais seguro)
+        e = by_key[key]
+        try:
+            v = json.loads(e[1]['value'])
+            v['is_deleted'] = True
+            e[1]['value'] = json.dumps(v, ensure_ascii=False, separators=(',', ':'))
+            e[1]['timestamp'] = int(time.time())
+            print(f"  [ÓRFÃ REMOVIDA] {nome_existente}")
+        except Exception:
+            pass
 
     rnd = random.Random(int(time.time()))
 
@@ -804,16 +925,37 @@ def main():
             e[1]['value'] = json.dumps(v, ensure_ascii=False, separators=(',', ':'))
             e[1]['timestamp'] = now
 
+    # Gravar JSON
     tmp = str(cs_file) + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(d, f, ensure_ascii=False)
     os.replace(tmp, cs_file)
 
-    print(f"\nCriadas: {created}, Atualizadas: {updated}")
+    # Melhoria 4: Validação pós-gravação
+    print("\nValidando arquivo gravado...")
+    try:
+        with open(cs_file, encoding='utf-8') as f:
+            d2 = json.load(f)
+        colecoes_validas = 0
+        for e in d2:
+            if e[0].startswith('user-collections.') and not e[1].get('is_deleted'):
+                try:
+                    v = json.loads(e[1]['value'])
+                    if v.get('name') and isinstance(v.get('added'), list):
+                        colecoes_validas += 1
+                except Exception:
+                    pass
+        print(f"  Arquivo JSON válido. {colecoes_validas} coleções ativas encontradas.")
+    except Exception as ex:
+        print(f"  ERRO na validação: {ex}")
+
+    print(f"\nCriadas: {created}, Atualizadas: {updated}, Órfãs removidas: {len(orfãs_removidas)}")
     print(f"Total jogos: {len(rows)}")
     for name in ORDER:
-        print(f"  {len(final_groups.get(name, set())):4d}  {name}")
-    print(f"\nBackup: {backup_dir}")
+        n = len(final_groups.get(name, set()))
+        print(f"  {n:4d}  {name}")
+    if backup_dir:
+        print(f"\nBackup: {backup_dir}")
     print("\nConcluído! Reinicie a Steam para ver as coleções.")
 
     # Reiniciar Steam opcionalmente
