@@ -149,6 +149,109 @@ def find_cloud_storage(userdata_dir):
 
 
 # =============================================================================
+# Parser VDF puro Python (fallback sem dependência externa)
+# =============================================================================
+
+def load_vdf_pure(path):
+    """Parse VDF (Valve Data Format) puro Python, sem dependências externas."""
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        text = f.read()
+    return _parse_vdf_text(text)
+
+
+def _tokenize_vdf(text):
+    """Tokeniza texto VDF em lista de strings e chaves '{' '}'."""
+    tokens = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c.isspace():
+            i += 1
+            continue
+        if c == '{':
+            tokens.append('{')
+            i += 1
+            continue
+        if c == '}':
+            tokens.append('}')
+            i += 1
+            continue
+        if c == '"':
+            i += 1
+            s = []
+            while i < n:
+                if text[i] == '\\' and i + 1 < n:
+                    nxt = text[i + 1]
+                    if nxt == 'n':
+                        s.append('\n')
+                    elif nxt == 't':
+                        s.append('\t')
+                    elif nxt == 'r':
+                        s.append('\r')
+                    elif nxt == '"':
+                        s.append('"')
+                    elif nxt == '\\':
+                        s.append('\\')
+                    else:
+                        s.append(nxt)
+                    i += 2
+                    continue
+                if text[i] == '"':
+                    i += 1
+                    break
+                s.append(text[i])
+                i += 1
+            tokens.append(''.join(s))
+            continue
+        if c == '/' and i + 1 < n and text[i + 1] == '/':
+            i += 2
+            while i < n and text[i] != '\n':
+                i += 1
+            continue
+        s = []
+        while i < n and not text[i].isspace() and text[i] not in '{}"/':
+            s.append(text[i])
+            i += 1
+        if s:
+            tokens.append(''.join(s))
+    return tokens
+
+
+def _parse_vdf_block(tokens, pos):
+    """Parse um bloco VDF (chave-valor aninhado). Retorna (dict, nova_pos)."""
+    result = {}
+    while pos[0] < len(tokens):
+        tok = tokens[pos[0]]
+        if tok == '}':
+            pos[0] += 1
+            return result, pos[0]
+        key = tok
+        pos[0] += 1
+        if pos[0] >= len(tokens):
+            result[key] = ''
+            break
+        next_tok = tokens[pos[0]]
+        if next_tok == '{':
+            pos[0] += 1
+            sub, pos[0] = _parse_vdf_block(tokens, pos)
+            result[key] = sub
+        else:
+            val = next_tok
+            pos[0] += 1
+            result[key] = val
+    return result, pos[0]
+
+
+def _parse_vdf_text(text):
+    """Parse texto VDF e retorna dicionário aninhado."""
+    tokens = _tokenize_vdf(text)
+    pos = [0]
+    result, _ = _parse_vdf_block(tokens, pos)
+    return result
+
+
+# =============================================================================
 # Perguntas interativas (gum se disponível, senão input())
 # =============================================================================
 
@@ -515,17 +618,37 @@ def build_library_full(steam_path):
     return out
 
 
-def build_library_fast(appinfo_path, lc_path):
-    """Constrói a partir do appinfo.vdf + localconfig.vdf (mais rápido, menos completo)."""
+def _unwrap_vdf_root(data):
+    """Se o VDF tiver uma única chave raiz (ex: 'root', 'appinfo'), retorna seu conteúdo."""
+    if isinstance(data, dict) and len(data) == 1:
+        only_key = next(iter(data))
+        return data[only_key]
+    return data
+
+
+def _load_vdf_file(path):
+    """Carrega arquivo VDF tentando pacote vdf primeiro, fallback puro Python."""
     try:
         import vdf
+        return vdf.load(open(path, encoding='utf-8', errors='replace'))
     except ImportError:
-        print("módulo vdf não instalado. pip install vdf")
-        return []
+        pass
+    except Exception as e:
+        print(f"[vdf] falhou ao ler {path}: {e}")
+    # Fallback puro Python
+    try:
+        return load_vdf_pure(path)
+    except Exception as e:
+        print(f"[pure-vdf] falhou ao ler {path}: {e}")
+        return {}
+
+
+def build_library_fast(appinfo_path, lc_path):
+    """Constrói a partir do appinfo.vdf + localconfig.vdf (mais rápido, menos completo)."""
 
     apps_data = {}
     try:
-        ai = vdf.load(open(appinfo_path, encoding='utf-8', errors='replace'))
+        ai = _unwrap_vdf_root(_load_vdf_file(appinfo_path))
         for appid, app in ai.get('apps', {}).items():
             common = app.get('common', {})
             apps_data[appid] = {
@@ -540,7 +663,7 @@ def build_library_fast(appinfo_path, lc_path):
         print(f"appinfo.vdf não lido: {e}")
 
     try:
-        lc = vdf.load(open(lc_path, encoding='utf-8', errors='replace'))
+        lc = _unwrap_vdf_root(_load_vdf_file(lc_path))
         userapps = lc.get('UserLocalConfigStore', {}).get('apps', {})
         for appid, app in userapps.items():
             if appid in apps_data:
@@ -566,7 +689,10 @@ def build_library_fast(appinfo_path, lc_path):
 # =============================================================================
 
 def ensure_deps():
-    """Tenta instalar dependências Python automaticamente (vdf, websocket-client, psutil)."""
+    """Tenta instalar dependências Python automaticamente (vdf, websocket-client, psutil).
+    
+    vdf é opcional: se não puder ser instalado, usa parser VDF puro Python embutido.
+    """
     for pkg in ["vdf", "websocket-client", "psutil"]:
         try:
             __import__(pkg.replace("-", "_"))
@@ -579,8 +705,11 @@ def ensure_deps():
                 )
                 print(f"  {pkg} instalado com sucesso.")
             except Exception as e:
-                print(f"  Não foi possível instalar {pkg}: {e}")
-                print(f"  Rode manualmente: pip install {pkg}")
+                if pkg == "vdf":
+                    print(f"  vdf não instalado — usando parser VDF puro Python (sem impacto).")
+                else:
+                    print(f"  Não foi possível instalar {pkg}: {e}")
+                    print(f"  Rode manualmente: pip install {pkg}")
 
 
 def steam_is_running():
