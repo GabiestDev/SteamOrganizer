@@ -1,4 +1,4 @@
-# steamorganizer
+# SteamOrganizer
 
 Organizador de biblioteca Steam em português (pt-BR). Script único em **Python puro** que funciona tanto no **Windows** quanto no **Linux**, classificando seus jogos em coleções bem nomeadas com perguntas interativas no startup.
 
