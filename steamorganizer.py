@@ -877,6 +877,18 @@ class SteamOrganizer:
         p = userdata_dir / "config" / "cloudstorage" / "cloud-storage-namespace-1.json"
         return p if p.exists() else None
 
+    def _detect_duplicates(self, rows):
+        seen, duplicates = {}, []
+        for r in rows:
+            aid, name = str(r.get("appid", "")), (r.get("name", "") or "").strip()
+            if not aid or not name:
+                continue
+            if aid in seen and seen[aid] != name:
+                duplicates.append({"appid": aid, "names": [seen[aid], name]})
+            else:
+                seen[aid] = name
+        return duplicates
+
     @staticmethod
     def _load_hidden(cs_file):
         hidden = set()
