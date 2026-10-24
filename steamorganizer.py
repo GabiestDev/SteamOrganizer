@@ -19,9 +19,24 @@ import time
 from pathlib import Path
 
 
+def steam_binary():
+    steam_bin = shutil.which("steam")
+    if not steam_bin:
+        if sys.platform.startswith("win"):
+            steam_bin = "steam.exe"
+        elif sys.platform == "darwin":
+            steam_bin = "/Applications/Steam.app/Contents/MacOS/steam"
+        else:
+            steam_bin = "/usr/bin/steam"
+    return steam_bin
+
+
 class SteamDetector:
     def __init__(self):
-        self.is_win = sys.platform.startswith("win")
+        platform = sys.platform
+        self.is_win = platform.startswith("win")
+        self.is_mac = platform == "darwin"
+        self.is_linux = platform.startswith("linux")
 
     def _expand(self, path):
         return Path(os.path.expandvars(str(path))).expanduser()
@@ -88,13 +103,23 @@ class SteamDetector:
                 str(Path.home() / "AppData" / "Local" / "Steam"),
             ]
         else:
-            candidates = [
-                str(Path.home() / ".local" / "share" / "Steam"),
-                str(Path.home() / ".var" / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam"),
-                str(Path.home() / "snap" / "steam" / "common" / ".local" / "share" / "Steam"),
-                str(Path.home() / ".steam" / "steam"),
-                str(Path.home() / ".steam" / "root"),
-            ]
+  
+            if self.is_mac:
+
+                candidates = [
+                    str(Path.home() / "Library" / "Application Support" / "Steam"),
+                    "/Applications/Steam.app/Contents/MacOS",
+                    str(Path.home() / ".steam" / "steam"),
+                ]
+            else:
+
+                candidates = [
+                    str(Path.home() / ".local" / "share" / "Steam"),
+                    str(Path.home() / ".var" / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam"),
+                    str(Path.home() / "snap" / "steam" / "common" / ".local" / "share" / "Steam"),
+                    str(Path.home() / ".steam" / "steam"),
+                    str(Path.home() / ".steam" / "root"),
+                ]
         found = []
         for c in candidates:
             p = self._expand(c)
@@ -272,11 +297,22 @@ class TagResolver:
 
     @classmethod
     def load(cls):
-        for tf in (
-            Path.home() / ".local" / "share" / "Steam" / "steamui" / "tagnames.json",
-            Path.home() / "AppData" / "Roaming" / "Steam" / "steamui" / "tagnames.json",
-            Path.home() / "AppData" / "Local" / "Steam" / "steamui" / "tagnames.json",
-        ):
+
+        tag_paths = []
+        if sys.platform.startswith("win"):
+            tag_paths = [
+                Path.home() / "AppData" / "Roaming" / "Steam" / "steamui" / "tagnames.json",
+                Path.home() / "AppData" / "Local" / "Steam" / "steamui" / "tagnames.json",
+            ]
+        elif sys.platform == "darwin":
+            tag_paths = [
+                Path.home() / "Library" / "Application Support" / "Steam" / "steamui" / "tagnames.json",
+            ]
+        else:
+            tag_paths = [
+                Path.home() / ".local" / "share" / "Steam" / "steamui" / "tagnames.json",
+            ]
+        for tf in tag_paths:
             if tf.exists():
                 try:
                     for k, v in json.load(open(tf, encoding="utf-8")).items():
@@ -475,7 +511,7 @@ class LibraryBuilder:
 
     @classmethod
     def full(cls, steam_path):
-        steam_bin = shutil.which("steam") or ("steam.exe" if sys.platform.startswith("win") else "/usr/bin/steam")
+        steam_bin = steam_binary()
         marker = Path(tempfile.gettempdir()) / "steamorganizer_debug_marker"
         if not marker.exists():
             try:
@@ -589,8 +625,9 @@ class SteamManager:
             return False
         print("Enviando steam -shutdown...")
         try:
+
             subprocess.run(
-                [shutil.which("steam") or ("steam.exe" if sys.platform.startswith("win") else "/usr/bin/steam"), "-shutdown"],
+                [steam_binary(), "-shutdown"],
                 capture_output=True, timeout=30,
             )
         except Exception as e:
@@ -606,8 +643,9 @@ class SteamManager:
     @staticmethod
     def start():
         try:
+
             subprocess.Popen(
-                [shutil.which("steam") or ("steam.exe" if sys.platform.startswith("win") else "/usr/bin/steam")],
+                [steam_binary()],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
         except Exception as e:
@@ -647,24 +685,34 @@ class UI:
             return [options[default_index]]
 
     @classmethod
+    def _has_tty(cls):
+        return sys.stdin.isatty()
+
+    @classmethod
     def input(cls, header, default="", placeholder="", enabled=True):
-        if not enabled:
+        if not enabled or not cls._has_tty():
             return default
         gum_ok, out = cls._run_gum(["gum", "input", "--header", header, "--value", default or ""])
         if gum_ok:
             return out
-        val = input(f"{header} [{default or placeholder}]: ").strip()
+        try:
+            val = input(f"{header} [{default or placeholder}]: ").strip()
+        except EOFError:
+            return default or placeholder or ""
         return val if val else (default or placeholder or "")
 
     @classmethod
     def confirm(cls, header, default=True, enabled=True):
-        if not enabled:
+        if not enabled or not cls._has_tty():
             return default
         gum_ok, _ = cls._run_gum(["gum", "confirm", "--default", str(default).lower(), "--header", header])
         if gum_ok:
             return True
         d = "S/n" if default else "s/N"
-        resp = input(f"{header} [{d}]: ").strip().lower()
+        try:
+            resp = input(f"{header} [{d}]: ").strip().lower()
+        except EOFError:
+            return default
         if not resp:
             return default
         return resp in ("s", "sim", "y", "yes")
@@ -843,6 +891,28 @@ class SteamOrganizer:
             pass
         return hidden
 
+
+    def _build_franchise(self, rows, hidden, criar_fam, nome_fam):
+        franchise_cols = {}
+        if criar_fam:
+            for fname, pat, emoji in FRANCHISES:
+                apps = set()
+                for r in rows:
+                    if r.get("apptype", 1) not in (1, 2):
+                        continue
+                    aid = int(r["appid"])
+                    if aid in hidden:
+                        continue
+                    name = (r.get("name") or "").replace("®", "").replace("™", "")
+                    if BAD_FRANCHISE.search(name):
+                        continue
+                    if re.search(pat, name, re.IGNORECASE):
+                        apps.add(aid)
+                if len(apps) >= 2:
+                    col_name = f"{emoji} {fname}"
+                    franchise_cols[col_name] = apps
+        return franchise_cols
+
     def run(self):
         enabled = self._enabled()
         print("=== steamorganizer — Organizador de Biblioteca Steam (pt-BR) ===\n")
@@ -866,7 +936,12 @@ class SteamOrganizer:
             print("Nenhum userdata encontrado.")
             return
 
-        steam_id = self._select_user(userdirs, enabled)
+        steam_id = self.args.get("user")
+        if steam_id and steam_id not in [u.name for u in userdirs]:
+            print(f"Usuário {steam_id} não encontrado. Usando detecção automática.")
+            steam_id = None
+        if not steam_id:
+            steam_id = self._select_user(userdirs, enabled)
         userdata_dir = next((u for u in userdirs if u.name == steam_id), userdirs[0])
         cs_file = self._find_cloud_storage(userdata_dir)
         lc_file = userdata_dir / "config" / "localconfig.vdf"
