@@ -485,7 +485,8 @@ class LibraryBuilder:
                     "playtime": 0, "play2w": 0, "lastplayed": 0,
                 }
         except Exception as e:
-            print(f"appinfo.vdf não lido: {e}")
+            print(f"appinfo.vdf não lido (arquivo pode estar corrompido): {e}")
+            # Continua apenas com localconfig.vdf
 
         try:
             lc = VDFParser.load(lc_path)
@@ -1120,6 +1121,11 @@ class SteamOrganizer:
         writer = CollectionWriter(cs_file, self.ui, backup_path=backup_dir / cs_file.name if backup_dir else None)
         created, updated, orfãs = writer.write(final_groups, order, criar_inst, nome_inst)
 
+        dups = self._detect_duplicates(rows)
+        if dups:
+            print(f"\n⚠ Duplicados detectados: {len(dups)}")
+            for d in dups[:5]:
+                print(f"  AppID {d['appid']}: {', '.join(d['names'])}")
         print(f"\nCriadas: {created}, Atualizadas: {updated}, Órfãs removidas: {orfãs}")
         print(f"Total jogos: {len(rows)}")
         for name in order:
