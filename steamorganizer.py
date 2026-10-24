@@ -472,21 +472,21 @@ class LibraryBuilder:
     def fast(cls, appinfo_path, lc_path):
         apps_data = {}
         try:
-            ai = VDFParser.load(appinfo_path)
-            root = cls._unwrap(ai)
-            for appid, app in root.get("apps", {}).items():
-                common = app.get("common", {})
-                apps_data[appid] = {
-                    "appid": appid,
-                    "name": common.get("name", ""),
-                    "apptype": 1,
-                    "tags": app.get("store_tags", []) or [],
-                    "installed": False,
-                    "playtime": 0, "play2w": 0, "lastplayed": 0,
-                }
+            if os.path.exists(appinfo_path) and os.path.getsize(appinfo_path) < 50 * 1024 * 1024:
+                ai = VDFParser.load(appinfo_path)
+                root = cls._unwrap(ai)
+                for appid, app in root.get("apps", {}).items():
+                    common = app.get("common", {})
+                    apps_data[appid] = {
+                        "appid": appid,
+                        "name": common.get("name", ""),
+                        "apptype": 1,
+                        "tags": app.get("store_tags", []) or [],
+                        "installed": False,
+                        "playtime": 0, "play2w": 0, "lastplayed": 0,
+                    }
         except Exception as e:
-            print(f"appinfo.vdf não lido (arquivo pode estar corrompido): {e}")
-            # Continua apenas com localconfig.vdf
+            print(f"appinfo.vdf ignorado (corrompido/grande): {e}")
 
         try:
             lc = VDFParser.load(lc_path)
