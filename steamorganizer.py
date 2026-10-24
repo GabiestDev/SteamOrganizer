@@ -913,6 +913,28 @@ class SteamOrganizer:
                     franchise_cols[col_name] = apps
         return franchise_cols
 
+    def _process_groups(self, rows, hidden, sel_set, cat_nomes, cat_emojis, nome_fam, nome_inst):
+        groups = {}
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_to_app = {executor.submit(Classifier.classify, r): r for r in rows if int(r["appid"]) not in hidden}
+            for future in concurrent.futures.as_completed(future_to_app):
+                app = future_to_app[future]
+                cols = future.result()
+                aid = int(app["appid"])
+                for c in cols:
+                    groups.setdefault(c, set()).add(aid)
+        final_groups = {}
+        for c, appids in groups.items():
+            nome_exibicao = c
+            for interno, nome in cat_nomes.items():
+                if interno in c or c.endswith(interno):
+                    nome_exibicao = nome + " " + cat_emojis.get(interno, "")
+                    break
+            if nome_exibicao not in sel_set and nome_exibicao not in (nome_fam, nome_inst):
+                continue
+            final_groups.setdefault(nome_exibicao, set()).update(appids)
+        return groups, final_groups
+
     def run(self):
         enabled = self._enabled()
         print("=== steamorganizer — Organizador de Biblioteca Steam (pt-BR) ===\n")
