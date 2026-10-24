@@ -472,7 +472,7 @@ class LibraryBuilder:
     def fast(cls, appinfo_path, lc_path):
         apps_data = {}
         try:
-            if os.path.exists(appinfo_path) and os.path.getsize(appinfo_path) < 50 * 1024 * 1024:
+            if os.path.exists(appinfo_path) and os.path.getsize(appinfo_path) < 1024 * 1024:
                 ai = VDFParser.load(appinfo_path)
                 root = cls._unwrap(ai)
                 for appid, app in root.get("apps", {}).items():
